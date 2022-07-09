@@ -1,14 +1,14 @@
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-from utils.preprocess import create_weight_mask
+from .preprocess import create_weight_mask
 
 import numpy as np
 from itertools import product
 
 import os
 
-from model.QuadNet import assign_nets_to_coords
+from ..model.QuadNet import assign_nets_to_coords
 
 
 def train_epoch(model, data_loader, loss, optimizer, model_device, loss_device):
@@ -44,25 +44,16 @@ def train_epoch(model, data_loader, loss, optimizer, model_device, loss_device):
 
             # Move volume and aseg to model and loss devices respectively and change aseg to LongTensor type for loss
             volume = volume.to(model_device)
-            aseg = aseg.type(torch.cuda.LongTensor)
-            aseg = aseg.to(loss_device)
+            aseg = aseg.type(torch.cuda.LongTensor).to(loss_device)
 
             output = model(volume)          # Feedforward through model
 
             if len(weights.size()) != 1:
                 weights = weights.to(loss_device)
 
-            coords = model.coords           # Extract coordinates of extracted patch in model
-            patch_size = model.patch_size   # Extract patch size from model
-            
             # Extract aseg and weight patch from same coordinate
-            aseg = aseg[..., coords[0]:coords[0] + patch_size[0],
-                   coords[1]:coords[1] + patch_size[1],
-                   coords[2]:coords[2] + patch_size[2]]
-
-            weights = weights[..., coords[0]:coords[0] + patch_size[0],
-                      coords[1]:coords[1] + patch_size[1],
-                      coords[2]:coords[2] + patch_size[2]]
+            aseg = model.crop_vol_to_patch(aseg)
+            weights = model.crop_vol_to_patch(weights)
 
             output = output.to(loss_device)
             batch_loss, _, _ = loss(output, aseg, weights) # Calculate loss on loss device
