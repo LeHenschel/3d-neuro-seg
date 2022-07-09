@@ -60,32 +60,31 @@ class RCVNet(nn.Module):
 
         # Choose sub model
         if params['sub_model_name'] == 'vnet':
-            from model.VNet import EncoderBlock, BottleNeck, DecoderBlock
+            from ThreeDNeuroSeg.model.VNet import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_2d_3d':
-            from model.VNet_2D_3D import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNet_2D_3D import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_asym':
-            from model.VNetAsym import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNetAsym import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_sym':
-            from model.VNetSym import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNetSym import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_denseadd':
-            from model.VNetDenseAdd import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNetDenseAdd import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_exclusion':
-            from model.VNetExclusion import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNetExclusion import EncoderBlock, BottleNeck, DecoderBlock
         elif params['sub_model_name'] == 'vnet_se':
-            from model.VNetSE import EncoderBlock, BottleNeck, DecoderBlock
+            from .VNetSE import EncoderBlock, BottleNeck, DecoderBlock
         else:
             raise ValueError(f"{params['sub_model_name']} does not exist.")
 
         # Start model creation
         # in_channels: 16, out_channels: 16
         # Parameters for the Descending Arm
-        self.encoderbase = nn.ModuleList()
-        for i in range(params["num_blocks"] - 1):
-            if i > 0:
-                params['input'] = False
-                params['create_layer_1'] = True
-                params['in_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
-                params['out_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
+        self.encoderbase = nn.ModuleList([EncoderBlock(params)]) # 1, 16
+        for i in range(1, params["num_blocks"] - 1):
+            params['input'] = False
+            params['create_layer_1'] = True
+            params['in_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
+            params['out_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
 
             self.encoderbase.append(EncoderBlock(params))
 
@@ -116,30 +115,30 @@ class RCVNet(nn.Module):
 
         self.gpu_map = params['gpu_map']
 
-    def random_patch(self, x):
+    def set_coords(self):
         # Generate Random Coordinates if needed
         if self.gen_random:  # For usage by QuadNet
             self.coords = make_rand_coords(self.input_shape, self.patch_size)
+
+    def crop_vol_to_patch(self, img):
         assert self.coords is not None
+        return img[..., self.coords[0]:self.coords[0] + self.patch_size[0],
+                   self.coords[1]:self.coords[1] + self.patch_size[1],
+                   self.coords[2]:self.coords[2] + self.patch_size[2]]
 
-        # Cropped Patch for the part of encoder
-        x_upper = x[..., self.coords[0]:self.coords[0] + self.patch_size[0],
-                    self.coords[1]:self.coords[1] + self.patch_size[1],
-                    self.coords[2]:self.coords[2] + self.patch_size[2]]
-        return x_upper
-
-    def forward(self, x):
+    def forward(self, x, sf=None, affine=None):
         """
         Standard VNet Architecture
         """
         if self.training:
-            x = self.random_patch(x)
+            self.set_coords()
+            x = self.crop_vol_to_patch(x)
 
         # Running Encoder side of network
         encode, skip, decode = [x], [], []
         for i in range(self.num_blocks):
             input = multi_gpu_check(self.gpu_map, 'encoder_block_' + str(i + 1), encode[i])
-            skip_encoder, encoder_output  = self.encoderbase[i](input)
+            skip_encoder, encoder_output = self.encoderbase[i](input)
             encode.append(encoder_output)
             skip.append(skip_encoder)
 
@@ -252,7 +251,8 @@ if __name__ == "__main__":
               'gen_random' : True,
               'gpu_map':{},
               'num_blocks': 5,
-              'sub_model_name': "vnet"
+              'sub_model_name': "vnet",
+              'training': True
               }
 
     m = RCVNet(params=params).cuda()
