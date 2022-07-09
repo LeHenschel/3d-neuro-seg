@@ -94,6 +94,7 @@ class EncoderBlock(nn.Module):
         super(EncoderBlock, self).__init__()
 
         if params['input']:
+            print("Input", params["in_channels"], params["out_channels"])
             self.conv_input = nn.Sequential(
                 nn.Conv3d(in_channels=params['in_channels'], out_channels=params['out_channels'],
                           kernel_size=(1,1,1), padding=0, stride=1),
