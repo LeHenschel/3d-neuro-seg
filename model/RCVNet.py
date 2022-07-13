@@ -1,17 +1,16 @@
 import torch
 import torch.nn as nn
 
-from numpy.random import random_sample
 
-def make_rand_coords(input_size=(256,256,256), patch_size=(64,64,64)):
+def make_rand_coords(input_size=(256, 256, 256), patch_size=(64, 64, 64)):
     return [get_dims(input_size[0] - patch_size[0]), \
-           get_dims(input_size[1] - patch_size[1]), \
-           get_dims(input_size[2] - patch_size[2])]
+            get_dims(input_size[1] - patch_size[1]), \
+            get_dims(input_size[2] - patch_size[2])]
 
 
 def get_dims(upper):
     # Random value in the range [0, upper)
-    return int(upper * random_sample())
+    return int(upper * torch.rand(1))
 
 
 def multi_gpu_check(gpu_map, l_name, *args):
@@ -31,13 +30,12 @@ def multi_gpu_check(gpu_map, l_name, *args):
             args[idx] = l.to(torch.device(gpu_map[l_name]))
             # print(args[idx].device, gpu_map[l_name])
 
-    if len(args)==1:
+    if len(args) == 1:
         return args[0]
     return args
 
 
 class RCVNet(nn.Module):
-
     """
     Random Cropping VNet. Model is designed to extract patches randomly during feedforward pass unless specifically
     prevented by setting a random patch coordinate manually. Can also move operations for individual layers to different
@@ -79,39 +77,31 @@ class RCVNet(nn.Module):
         # Start model creation
         # in_channels: 16, out_channels: 16
         # Parameters for the Descending Arm
-        self.encoderbase = nn.ModuleList([EncoderBlock(params)]) # 1, 16
-        for i in range(1, params["num_blocks"] - 1):
+        self.encoderbase = nn.ModuleList()
+        increment = params["total_conv_per_layer"] // 3
+        for i in range(params["num_blocks"] - 1):
+            params['conv_per_layer'] = min(increment + i * increment, params["total_conv_per_layer"])
+            self.encoderbase.append(EncoderBlock(params))  # 1, 16
             params['input'] = False
-            params['create_layer_1'] = True
             params['in_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
             params['out_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
 
-            self.encoderbase.append(EncoderBlock(params))
-
-            params['create_layer_2'] = True
-
-        params['in_channels'] = params['out_channels'] * 2  # 32, 64, 128, 256
-        params['out_channels'] = params['out_channels'] * 2
-
         self.bottleneck_block = BottleNeck(params)
-        # Parameters for Ascending Arm
-        params['in_channels'] = params['out_channels'] + int(params['out_channels'] / 2)  # 256 + 128 = 384
-        self.decoderbase = nn.ModuleList([DecoderBlock(params)])
-        for i in range(params["num_blocks"]-2):
 
-            params['out_channels'] = int(params['out_channels'] / 2)  # 128, 64, 32
-            params['in_channels'] = params['out_channels'] + int(params['out_channels']/2)  # 128 + 64 = 192, 64 + 32 = 96
-            if i == params["num_blocks"] - 4: # second to last layer
-                params['create_layer_2'] = False
-            if i == params["num_blocks"] - 3:
-                params['create_layer_1'] = False
-                params['out'] = True
+        # Parameters for Ascending Arm
+        self.decoderbase = nn.ModuleList()
+        for i in range(params["num_blocks"] - 1):
+            # 256 + 128 = 384, 128 + 64 = 192, 64 + 32 = 96
+            params['in_channels'] = params['out_channels'] + int(params['out_channels'] / 2)
+            params['out'] = (params["num_blocks"] - 2) == i
             self.decoderbase.append(DecoderBlock(params))
+            params['out_channels'] = int(params['out_channels'] / 2)  # 128, 64, 32
+            params['conv_per_layer'] = max(params['total_conv_per_layer'] - increment * i, increment)
 
         # Logits
         params['out'] = False
-        self.output_block = nn.Conv3d(in_channels=params['out_channels'], out_channels=params['num_classes'],
-                                      kernel_size = (1, 1, 1), stride = 1, padding = 0)
+        self.output_block = nn.Conv3d(in_channels=params['out_channels'] * 2, out_channels=params['num_classes'],
+                                      kernel_size=(1, 1, 1), stride=1, padding=0)
 
         self.gpu_map = params['gpu_map']
 
@@ -123,8 +113,15 @@ class RCVNet(nn.Module):
     def crop_vol_to_patch(self, img):
         assert self.coords is not None
         return img[..., self.coords[0]:self.coords[0] + self.patch_size[0],
-                   self.coords[1]:self.coords[1] + self.patch_size[1],
-                   self.coords[2]:self.coords[2] + self.patch_size[2]]
+               self.coords[1]:self.coords[1] + self.patch_size[1],
+               self.coords[2]:self.coords[2] + self.patch_size[2]]
+
+    def assure_non_empty(self, img, eps=128):
+        crop = self.crop_vol_to_patch(img)
+        while torch.sum(crop) < eps:
+            self.set_coords()
+            self.crop_vol_to_patch(img)
+        return crop
 
     def forward(self, x, sf=None, affine=None):
         """
@@ -148,7 +145,8 @@ class RCVNet(nn.Module):
 
         # Run decoder
         for i in range(self.num_blocks):
-            skip_in, decode_in = multi_gpu_check(self.gpu_map, 'decoder_block_' + str(self.num_blocks - 1), skip[-i-1], decode[i])
+            skip_in, decode_in = multi_gpu_check(self.gpu_map, 'decoder_block_' + str(self.num_blocks - 1),
+                                                 skip[-i - 1], decode[i])
             decode.append(self.decoderbase[i](skip_in, decode_in))
 
         # Run logits
@@ -172,55 +170,55 @@ class RCVNetAttention(RCVNet):
         self.gen_random = params['gen_random']
 
         self.down_input_lower = nn.Sequential(
-                nn.Conv3d(in_channels=params['in_channels'], out_channels=4*params['out_channels'],
-                          kernel_size=(4,4,4), padding=0, stride=4),
-                nn.GroupNorm(num_groups=4, num_channels=4*params['out_channels']),
-                nn.PReLU()
-            )
+            nn.Conv3d(in_channels=params['in_channels'], out_channels=4 * params['out_channels'],
+                      kernel_size=(4, 4, 4), padding=0, stride=4),
+            nn.GroupNorm(num_groups=4, num_channels=4 * params['out_channels']),
+            nn.PReLU()
+        )
         # in_channels: 16, out_channels: 16
         self.encoder_block_1 = AttEncoderBlock(params)
 
         params['input'] = False
         params['create_layer_1'] = True
-        params['in_channels'] = params['out_channels'] * 2 # 32
-        params['out_channels'] = params['out_channels'] * 2 # 32
+        params['in_channels'] = params['out_channels'] * 2  # 32
+        params['out_channels'] = params['out_channels'] * 2  # 32
         self.encoder_block_2 = AttEncoderBlock(params)
 
         params['create_layer_2'] = True
-        params['in_channels'] = params['out_channels'] * 2 # 64
-        params['out_channels'] = params['out_channels'] * 2 # 64
+        params['in_channels'] = params['out_channels'] * 2  # 64
+        params['out_channels'] = params['out_channels'] * 2  # 64
         self.encoder_block_3 = AttEncoderBlock(params)
 
-        params['in_channels'] = params['out_channels'] * 2 # 128
-        params['out_channels'] = params['out_channels'] * 2 # 128
+        params['in_channels'] = params['out_channels'] * 2  # 128
+        params['out_channels'] = params['out_channels'] * 2  # 128
         self.encoder_block_4 = AttEncoderBlock(params)
 
-        params['in_channels'] = params['out_channels'] * 2 # 256
-        params['out_channels'] = int(params['out_channels'] * 2) # 256
+        params['in_channels'] = params['out_channels'] * 2  # 256
+        params['out_channels'] = int(params['out_channels'] * 2)  # 256
         self.bottleneck_block = AttBottleNeck(params)
 
         enc_channels = 128
-        params['in_channels'] = params['out_channels'] + enc_channels # 256 + 128
+        params['in_channels'] = params['out_channels'] + enc_channels  # 256 + 128
         params['F_g'], params['F_l'], params['F_int'] = (256, 128, 128)
-        params['out_channels'] = params['out_channels'] # 256
+        params['out_channels'] = params['out_channels']  # 256
         self.decoder_block_4 = AttDecoderBlock(params)
 
-        enc_channels = int(enc_channels/2)
-        params['in_channels'] = int(params['out_channels']/2) + enc_channels # 128 + 64
+        enc_channels = int(enc_channels / 2)
+        params['in_channels'] = int(params['out_channels'] / 2) + enc_channels  # 128 + 64
         params['out_channels'] = int(params['out_channels'] / 2)  # 128
         params['F_g'], params['F_l'], params['F_int'] = (128, 64, 64)
         self.decoder_block_3 = AttDecoderBlock(params)
 
-        enc_channels = int(enc_channels/2)
+        enc_channels = int(enc_channels / 2)
         params['in_channels'] = int(params['out_channels'] / 2) + enc_channels  # 64 + 32
-        params['out_channels'] = int(params['out_channels'] / 2) # 64
+        params['out_channels'] = int(params['out_channels'] / 2)  # 64
         params['F_g'], params['F_l'], params['F_int'] = (64, 32, 32)
         params['create_layer_2'] = False
         self.decoder_block_2 = AttDecoderBlock(params)
 
-        enc_channels = int(enc_channels/2)
-        params['in_channels'] = int(params['out_channels'] / 2) + enc_channels # 32 + 16
-        params['out_channels'] = int(params['out_channels'] / 2) # 32
+        enc_channels = int(enc_channels / 2)
+        params['in_channels'] = int(params['out_channels'] / 2) + enc_channels  # 32 + 16
+        params['out_channels'] = int(params['out_channels'] / 2)  # 32
         params['F_g'], params['F_l'], params['F_int'] = (32, 16, 16)
         params['create_layer_1'] = False
         params['out'] = True
@@ -228,7 +226,7 @@ class RCVNetAttention(RCVNet):
         params['out'] = False
 
         self.output_block = nn.Conv3d(in_channels=params['out_channels'], out_channels=params['num_classes'],
-                                      kernel_size = (1, 1, 1), stride = 1, padding = 0)
+                                      kernel_size=(1, 1, 1), stride=1, padding=0)
 
         self.gpu_map = params['gpu_map']
 
@@ -237,19 +235,18 @@ if __name__ == "__main__":
     # TEST CODE [RUN THIS TO VERIFY MODELS]
     params = {'in_channels': 1,
               'out_channels': 16,
-              'create_layer_1': False,
-              'create_layer_2': False,
-              'kernel_size': (5, 5, 5),
-              'input_shape': (64,64,64),
-              'patch_size': (64,64,64),
-              'num_classes': 40,
+              'total_conv_per_layer': 6,
+              'kernel_size': (3, 3, 3),
+              'input_shape': (64, 64, 64),
+              'patch_size': (64, 64, 64),
+              'num_classes': 34,
               'out': False,
               'input': True,
               # 'F_g': None,
               # 'F_l': None,
               # 'F_int': None
-              'gen_random' : True,
-              'gpu_map':{},
+              'gen_random': True,
+              'gpu_map': {},
               'num_blocks': 5,
               'sub_model_name': "vnet",
               'training': True
@@ -260,8 +257,9 @@ if __name__ == "__main__":
     # m = CompetitiveEncoderBlockInput(params=params).cuda()
     try:
         from torchsummary import summary
+
         # print([l for l in m.named_children()])
-        summary(m, input_size=(1,64,64,64))
+        summary(m, input_size=(1, 64, 64, 64))
     except ImportError:
         pass
     #
