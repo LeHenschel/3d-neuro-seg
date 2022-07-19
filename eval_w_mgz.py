@@ -149,8 +149,6 @@ def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class
         agg_device = volume.device
 
     model.eval()
-    # print(p_len, p_step)
-    # n_patches = inp_len/((p_len) if p_len>p_step else p_len-p_step)
 
     patch_s = [p for p in range(0, inp_len - p_len + 1, p_step)]
     patch_list = list(product(patch_s, patch_s, patch_s))
@@ -193,34 +191,19 @@ def eval_epoch_quadnet(model, volume, p_len=128, p_step=64, agg_device=None):
     logger.info("Total patches: {}".format(len(patch_list)))
 
     out = torch.zeros((1, options.num_classes, inp_len, inp_len, inp_len), device=agg_device)
-    # volume = volume.to(torch.device(options.model_device))
-
-    # if options.use_fv_quadnet:
-    #     model.load_state_dict(torch.load(options.base_pretrained_path))
-    #     out_vol = model(volume)
-    #     out_vol = torch.nn.functional.softmax(out_vol, dim=1)
-    #     out += out_vol
 
     for idx, k in enumerate(net_coords.keys()):
 
         part_model_save_path = os.path.join(options.quadnet_path, f"ensembled_model_{idx + 1}")
         model.load_state_dict(torch.load(part_model_save_path))
 
-        # out_vol = model(volume)
-        # out_vol = torch.nn.functional.softmax(out_vol, dim=1)
-        # out += out_vol
-
         quad_data = net_coords[k]  # list of (index, patch_coords)
-        # model_indices = [i for i, _ in quad_data]
         model_coordinates = [i for _, i in quad_data]  # remove the index from quad_data
 
         # print(k)
         for x, y, z in model_coordinates:
             outs_patch = model(volume[..., x:x + p_len, y:y + p_len, z:z + p_len])
-            # print(outs_patch.shape, (x,y,z))
-            # print(outs_patch[0, :, 64, 64, 64])
             outs_patch = torch.nn.functional.softmax(outs_patch, dim=1)
-            # print(outs_patch[0, :, 64, 64, 64])
             out[..., x:x + p_len, y:y + p_len, z:z + p_len] += outs_patch.to(agg_device)  # .squeeze(0).cpu()
             del outs_patch
 
@@ -246,6 +229,7 @@ def run_network(model, img_filename, save_as):
             header_info, affine_info, orig_data = load_and_conform_image(img_filename, interpol=1,
                                                                          logger=logger)
             # Convert to Torch float Tensor and b,c,0,1,2 formatting
+            orig_data = np.clip(orig_data / 255.0, a_min=0.0, a_max=1.0)
             orig_data = torch.from_numpy(orig_data).unsqueeze(0).unsqueeze(0).float()
             orig_data = orig_data.to(torch.device(options.model_device))
 
