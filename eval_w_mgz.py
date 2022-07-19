@@ -149,6 +149,8 @@ def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class
         agg_device = volume.device
 
     model.eval()
+    # print(p_len, p_step)
+    # n_patches = inp_len/((p_len) if p_len>p_step else p_len-p_step)
 
     patch_s = [p for p in range(0, inp_len - p_len + 1, p_step)]
     patch_list = list(product(patch_s, patch_s, patch_s))
@@ -191,19 +193,34 @@ def eval_epoch_quadnet(model, volume, p_len=128, p_step=64, agg_device=None):
     logger.info("Total patches: {}".format(len(patch_list)))
 
     out = torch.zeros((1, options.num_classes, inp_len, inp_len, inp_len), device=agg_device)
+    # volume = volume.to(torch.device(options.model_device))
+
+    # if options.use_fv_quadnet:
+    #     model.load_state_dict(torch.load(options.base_pretrained_path))
+    #     out_vol = model(volume)
+    #     out_vol = torch.nn.functional.softmax(out_vol, dim=1)
+    #     out += out_vol
 
     for idx, k in enumerate(net_coords.keys()):
 
         part_model_save_path = os.path.join(options.quadnet_path, f"ensembled_model_{idx + 1}")
         model.load_state_dict(torch.load(part_model_save_path))
 
+        # out_vol = model(volume)
+        # out_vol = torch.nn.functional.softmax(out_vol, dim=1)
+        # out += out_vol
+
         quad_data = net_coords[k]  # list of (index, patch_coords)
+        # model_indices = [i for i, _ in quad_data]
         model_coordinates = [i for _, i in quad_data]  # remove the index from quad_data
 
         # print(k)
         for x, y, z in model_coordinates:
             outs_patch = model(volume[..., x:x + p_len, y:y + p_len, z:z + p_len])
+            # print(outs_patch.shape, (x,y,z))
+            # print(outs_patch[0, :, 64, 64, 64])
             outs_patch = torch.nn.functional.softmax(outs_patch, dim=1)
+            # print(outs_patch[0, :, 64, 64, 64])
             out[..., x:x + p_len, y:y + p_len, z:z + p_len] += outs_patch.to(agg_device)  # .squeeze(0).cpu()
             del outs_patch
 
@@ -211,11 +228,7 @@ def eval_epoch_quadnet(model, volume, p_len=128, p_step=64, agg_device=None):
     return out
 
 
-def run_network(model, img_filename, save_as):
-    
-    if os.path.exists(save_as):
-        logger.info(f'{save_as} already exists, skipping!')
-        return
+def run_network(model, img_filename, save_as, params):
 
     start_total = time.time()
     logger.info("Reading volume {}".format(img_filename))
@@ -238,8 +251,8 @@ def run_network(model, img_filename, save_as):
             return None
             # exit(1)
 
-        pred_prob = torch.zeros((1, options.num_classes) + orig_data.shape[2:], device=torch.device(options.agg_device))
-#                                .to(torch.device(options.model_device))
+        pred_prob = torch.zeros((1, params["num_classes"]) + orig_data.shape[2:],
+                                device=torch.device(options.agg_device))
 
         # pred_prob = torch.zeros_like(orig_data).to(torch.device(options.model_device))
 
@@ -252,7 +265,7 @@ def run_network(model, img_filename, save_as):
         if options.eval_type == 'overlap':
             logger.info("Running overlapped evaluation on base model at {}".format(options.base_pretrained_path))
             start = time.time()
-            pred_prob += eval_epoch_patched(model, orig_data, p_len=options.overlap_side,
+            pred_prob += eval_epoch_patched(model, orig_data, p_len=options.overlap_side, n_class=params['num_classes'],
                                             p_step=options.overlap_stride, agg_device=torch.device(options.agg_device))
             logger.info("Overlapping evaluation in {:0.4f} seconds".format(time.time() - start))
 
@@ -364,7 +377,8 @@ def main(invol, save_file_name):
     model = RCVNet(params).to(torch.device(options.model_device))
     model.load_state_dict(torch.load(options.base_pretrained_path))
 
-    run_network(model, invol, save_file_name)
+    run_network(model, invol, save_file_name, params)
+
 
 def curl(url, target):
     import requests
