@@ -46,6 +46,7 @@ Author: Saikat Roy
 Modified by David Kügler
 """
 
+
 def options_parse():
     """
     Command line option parser
@@ -105,7 +106,7 @@ def options_parse():
     parser.add_argument('--simple_run', action='store_true', default=False,
                         help='Simplified run: only analyse one given image specified by --in_name (output: --out_name). '
                              'Need to specify absolute path to both --in_name and --out_name if this option is chosen.')
-    parser.add_argument('--cuda_device', type=str, default='cuda:0)', dest='model_device')
+    parser.add_argument('--cuda_device', type=str, default='cuda:0', dest='model_device')
     parser.add_argument('--aggregate_device', type=str, default='cuda_device', dest='agg_device')
 
     # 7. Options for full volume, overlapping and quadnet eval
@@ -131,9 +132,9 @@ def options_parse():
 
     return sel_option
 
+
 @torch.no_grad()
 def eval_epoch_fv(model, volume, agg_device=None):
-
     if agg_device is None:
         agg_device = volume.device
     model.eval()
@@ -144,7 +145,6 @@ def eval_epoch_fv(model, volume, agg_device=None):
 
 @torch.no_grad()
 def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class=79, agg_device=None):
-
     if agg_device is None:
         agg_device = volume.device
 
@@ -152,17 +152,17 @@ def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class
     # print(p_len, p_step)
     # n_patches = inp_len/((p_len) if p_len>p_step else p_len-p_step)
 
-    patch_s = [p for p in range(0,inp_len-p_len+1,p_step)]
+    patch_s = [p for p in range(0, inp_len - p_len + 1, p_step)]
     patch_list = list(product(patch_s, patch_s, patch_s))
     logger.info("Running overlapped evaluation for patch len = {} and patch step = {}".format(p_len, p_step))
     logger.info("Total patches: {}".format(len(patch_list)))
 
     out = torch.zeros((1, n_class, inp_len, inp_len, inp_len), device=agg_device)
 
-    for idx, (x,y,z) in enumerate(patch_list):
+    for idx, (x, y, z) in enumerate(patch_list):
         outs_patch = model(volume[..., x:x + p_len, y:y + p_len, z:z + p_len])
         outs_patch = torch.nn.functional.softmax(outs_patch, dim=1)
-        out[...,x:x+p_len, y:y+p_len, z:z+p_len] += outs_patch.to(agg_device)#.squeeze(0).cpu()
+        out[..., x:x + p_len, y:y + p_len, z:z + p_len] += outs_patch.to(agg_device)  # .squeeze(0).cpu()
 
     out = torch.nn.functional.softmax(out, dim=1)
     return out
@@ -170,8 +170,7 @@ def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class
 
 @torch.no_grad()
 def eval_epoch_quadnet(model, volume, p_len=128, p_step=64, agg_device=None):
-
-    inp_len = volume.shape[2] # Assuming equal dimensions
+    inp_len = volume.shape[2]  # Assuming equal dimensions
 
     # n_patches = inp_len / ((p_len) if p_len >= p_step else p_len - p_step)
 
@@ -238,7 +237,7 @@ def run_network(model, img_filename, save_as):
     start_total = time.time()
     logger.info("Reading volume {}".format(img_filename))
 
-    #TODO INSERT ASSERT FOR USING BOTH EVALUATION TYPE AS OVERLAP AND QUADNET TOGETHER.
+    # TODO INSERT ASSERT FOR USING BOTH EVALUATION TYPE AS OVERLAP AND QUADNET TOGETHER.
 
     with torch.no_grad():
 
@@ -402,18 +401,18 @@ if __name__ == "__main__":
 
     downloadurl = "https://b2share.fz-juelich.de/api/files/3c163ecc-1652-4ea5-ae48-1ee7e02d726f"
 
-    if not os.exists(options.base_pretrained_path):
+    if not os.path.exists(options.base_pretrained_path):
         basepath = os.path.dirname(options.base_pretrained_path)
-        if not os.exists(basepath):
+        if not os.path.exists(basepath):
             makedirs(basepath)
         curl(downloadurl + "/unensembled_model", options.base_pretrained_path)
 
     if options.eval_type == "quadnet":
-        if not os.exists(options.quadnet_path):
+        if not os.path.exists(options.quadnet_path):
             makedirs(options)
         for i in range(8):
-            target_file = f"/ensembled_model_{i+1}"
-            if not os.exists(options.quadnet_path + target_file):
+            target_file = f"/ensembled_model_{i + 1}"
+            if not os.path.exists(options.quadnet_path + target_file):
                 curl(downloadurl + target_file, options.quadnet_path + target_file)
 
     if options.simple_run:
