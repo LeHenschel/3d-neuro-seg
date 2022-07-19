@@ -12,7 +12,7 @@ import glob
 # from data_utils.preprocessing.preprocess_utils import load_paths
 
 from model.QuadNet import assign_nets_to_coords
-from model.inference.RCVNet import RCVNet, RCVNetAttention
+from model.RCVNet import RCVNet, RCVNetAttention
 
 from utils.fastsurfer.load_neuroimaging_data import get_largest_cc
 from utils.fastsurfer.load_neuroimaging_data import load_and_conform_image
@@ -361,7 +361,6 @@ def run_network(model, img_filename, save_as):
 
 
 def main(invol, save_file_name):
-
     params = {'in_channels': 1,
               'out_channels': 16,
               'create_layer_1': False,
