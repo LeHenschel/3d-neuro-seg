@@ -12,15 +12,10 @@ import glob
 # from data_utils.preprocessing.preprocess_utils import load_paths
 
 from model.QuadNet import assign_nets_to_coords
-from model.RCVNet import RCVNet, RCVNetAttention
+from model.RCVNet import RCVNet
 
-from utils.fastsurfer.load_neuroimaging_data import get_largest_cc
 from utils.fastsurfer.load_neuroimaging_data import load_and_conform_image
-from utils.fastsurfer.load_neuroimaging_data import map_label2aparc_aseg
-
-from scipy.ndimage.filters import median_filter, gaussian_filter
-from skimage.measure import label, regionprops
-from skimage.measure import label
+import FastInfantSurfer.data_util.data_utils as du
 
 from tqdm import tqdm
 from os import makedirs
@@ -149,8 +144,6 @@ def eval_epoch_patched(model, volume, p_len=128, p_step=32, inp_len=256, n_class
         agg_device = volume.device
 
     model.eval()
-    # print(p_len, p_step)
-    # n_patches = inp_len/((p_len) if p_len>p_step else p_len-p_step)
 
     patch_s = [p for p in range(0, inp_len - p_len + 1, p_step)]
     patch_list = list(product(patch_s, patch_s, patch_s))
@@ -193,34 +186,20 @@ def eval_epoch_quadnet(model, volume, p_len=128, p_step=64, agg_device=None):
     logger.info("Total patches: {}".format(len(patch_list)))
 
     out = torch.zeros((1, options.num_classes, inp_len, inp_len, inp_len), device=agg_device)
-    # volume = volume.to(torch.device(options.model_device))
 
-    # if options.use_fv_quadnet:
-    #     model.load_state_dict(torch.load(options.base_pretrained_path))
-    #     out_vol = model(volume)
-    #     out_vol = torch.nn.functional.softmax(out_vol, dim=1)
-    #     out += out_vol
 
     for idx, k in enumerate(net_coords.keys()):
 
         part_model_save_path = os.path.join(options.quadnet_path, f"ensembled_model_{idx + 1}")
         model.load_state_dict(torch.load(part_model_save_path))
 
-        # out_vol = model(volume)
-        # out_vol = torch.nn.functional.softmax(out_vol, dim=1)
-        # out += out_vol
-
         quad_data = net_coords[k]  # list of (index, patch_coords)
-        # model_indices = [i for i, _ in quad_data]
         model_coordinates = [i for _, i in quad_data]  # remove the index from quad_data
 
         # print(k)
         for x, y, z in model_coordinates:
             outs_patch = model(volume[..., x:x + p_len, y:y + p_len, z:z + p_len])
-            # print(outs_patch.shape, (x,y,z))
-            # print(outs_patch[0, :, 64, 64, 64])
             outs_patch = torch.nn.functional.softmax(outs_patch, dim=1)
-            # print(outs_patch[0, :, 64, 64, 64])
             out[..., x:x + p_len, y:y + p_len, z:z + p_len] += outs_patch.to(agg_device)  # .squeeze(0).cpu()
             del outs_patch
 
@@ -254,8 +233,6 @@ def run_network(model, img_filename, save_as, params):
         pred_prob = torch.zeros((1, params["num_classes"]) + orig_data.shape[2:],
                                 device=torch.device(options.agg_device))
 
-        # pred_prob = torch.zeros_like(orig_data).to(torch.device(options.model_device))
-
         if options.eval_type == 'full' or options.use_fv:
             logger.info("Running full volume evaluation on base model at {}".format(options.base_pretrained_path))
             start = time.time()
@@ -277,76 +254,10 @@ def run_network(model, img_filename, save_as, params):
             logger.info("Overlapping QuadNet evaluation in {:0.4f} seconds".format(time.time() - start))
 
         _, pred_prob = torch.max(pred_prob, 1)
-        pred_prob = pred_prob.squeeze(0).squeeze(0).cpu().numpy()
-        pred_prob = map_label2aparc_aseg(pred_prob)
-
-        # FastSurfer Post processing - Splitting classes
-        # Quick Fix for 2026 vs 1026; 2029 vs. 1029; 2025 vs. 1025
-        rh_wm = get_largest_cc(pred_prob == 41)
-        lh_wm = get_largest_cc(pred_prob == 2)
-        rh_wm = regionprops(label(rh_wm, background=0))
-        lh_wm = regionprops(label(lh_wm, background=0))
-        centroid_rh = np.asarray(rh_wm[0].centroid)
-        centroid_lh = np.asarray(lh_wm[0].centroid)
-
-        labels_list = np.array([1003, 1006, 1007, 1008, 1009, 1011,
-                                1015, 1018, 1019, 1020, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1034, 1035])
-
-        for label_current in labels_list:
-
-            label_img = label(pred_prob == label_current, connectivity=3, background=0)
-
-            for region in regionprops(label_img):
-
-                if region.label != 0:  # To avoid background
-
-                    if np.linalg.norm(np.asarray(region.centroid) - centroid_rh) < np.linalg.norm(
-                            np.asarray(region.centroid) - centroid_lh):
-                        mask = label_img == region.label
-                        pred_prob[mask] = label_current + 1000
-
-        # Quick Fixes for overlapping classes
-        aseg_lh = gaussian_filter(1000 * np.asarray(pred_prob == 2, dtype=np.float), sigma=3)
-        aseg_rh = gaussian_filter(1000 * np.asarray(pred_prob == 41, dtype=np.float), sigma=3)
-
-        lh_rh_split = np.argmax(
-            np.concatenate((np.expand_dims(aseg_lh, axis=3), np.expand_dims(aseg_rh, axis=3)), axis=3),
-            axis=3)
-
-        # Problematic classes: 1026, 1011, 1029, 1019
-        for prob_class_lh in [1011, 1019, 1026, 1029]:
-            prob_class_rh = prob_class_lh + 1000
-            mask_lh = ((pred_prob == prob_class_lh) | (pred_prob == prob_class_rh)) & (lh_rh_split == 0)
-            mask_rh = ((pred_prob == prob_class_lh) | (pred_prob == prob_class_rh)) & (lh_rh_split == 1)
-
-            pred_prob[mask_lh] = prob_class_lh
-            pred_prob[mask_rh] = prob_class_rh
-
-        # Clean-Up
-        if options.cleanup is True:
-
-            labels = [2, 4, 5, 7, 8, 10, 11, 12, 13, 14,
-                      15, 16, 17, 18, 24, 26, 28, 31, 41, 43, 44,
-                      46, 47, 49, 50, 51, 52, 53, 54, 58, 60, 63,
-                      77, 1026, 2026]
-
-            start = time.time()
-            pred_prob_medfilt = median_filter(pred_prob, size=(3, 3, 3))
-            mask = np.zeros_like(pred_prob)
-            tolerance = 25
-
-            for current_label in labels:
-                current_class = (pred_prob == current_label)
-                label_image = label(current_class, connectivity=3)
-
-                for region in regionprops(label_image):
-
-                    if region.area <= tolerance:
-                        mask_label = (label_image == region.label)
-                        mask[mask_label] = 1
-
-            pred_prob[mask == 1] = pred_prob_medfilt[mask == 1]
-            logger.info("Segmentation Cleaned up in {:0.4f} seconds.".format(time.time() - start))
+        pred_prob = pred_prob.squeeze(0).squeeze(0)  # .cpu().numpy()
+        lut = du.read_classes_from_lut(params["lut"])
+        torch_labels = torch.from_numpy(lut["ID"].values)
+        pred_prob = du.map_label2aparc_aseg(pred_prob, torch_labels)
 
         # Saving image
         header_info.set_data_dtype(np.int16)
@@ -359,23 +270,25 @@ def run_network(model, img_filename, save_as, params):
 def main(invol, save_file_name):
     params = {'in_channels': 1,
               'out_channels': 16,
-              'create_layer_1': False,
-              'create_layer_2': False,
+              'total_conv_per_layer': 6,
               'kernel_size': (3, 3, 3),
               'input_shape': (256, 256, 256),
               'patch_size': (128, 128, 128),
-              'num_classes': options.num_classes,
+              'num_classes': 34,
               'out': False,
               'input': True,
-              'sub_model_name': 'vnet',
-              # 'experiment_id': 'LResFCNet_VNetBlock_lx2_ML_alpha05',
-              # 'experiment_id': 'RCVNet_128_k3',
-              'gpu_map': {},
               'gen_random': False,
+              'gpu_map': {},
+              'num_blocks': 5,
+              'sub_model_name': 'vnet',
+              'training': False
+              'lut': "/autofs/vast/lzgroup/Users/LeonieHenschel/FastInfantSurfer/configs/FastInfantSurfer_LUT.tsv"
               }
 
     model = RCVNet(params).to(torch.device(options.model_device))
-    model.load_state_dict(torch.load(options.base_pretrained_path))
+    logger.info("Loading checkpoint {}".format(options.base_pretrained_path))
+    model_state = torch.load(options.base_pretrained_path, map_location=options.model_device)
+    model.load_state_dict(model_state["model_state"])
 
     run_network(model, invol, save_file_name, params)
 
